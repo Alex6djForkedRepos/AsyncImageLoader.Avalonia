@@ -13,9 +13,12 @@ namespace AsyncImageLoader.Core.Caching;
 public sealed class MemoryImageCache : IImageMemoryCache {
     private readonly object _gate = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly PriorityQueue<(string Key, Entry Entry), long> _evictionQueue = new();
     private readonly MemoryImageCacheOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ITimer? _cleanupTimer;
+    private long _accessSequence;
+    private uint _loadedItemCount;
     private bool _disposed;
 
     /// <summary>
@@ -60,9 +63,9 @@ public sealed class MemoryImageCache : IImageMemoryCache {
                 if (entry.LeaseCount == 0 && IsExpired(entry))
                     DetachEntryLocked(key, entry);
                 else {
-                    Touch(entry);
+                    Touch(key, entry);
                     entry.LeaseCount++;
-                    return new MemoryImageLease(entry.Image, () => Release(entry));
+                    return new MemoryImageLease(entry.Image, () => Release(key, entry));
                 }
             }
 
@@ -92,6 +95,7 @@ public sealed class MemoryImageCache : IImageMemoryCache {
         catch {
             lock (_gate) {
                 entry.WaiterCount--;
+                EnqueueForEvictionIfEligible(key, entry);
                 DisposeDetachedEntryIfUnused(entry);
             }
 
@@ -111,7 +115,7 @@ public sealed class MemoryImageCache : IImageMemoryCache {
             }
 
             entry.LeaseCount++;
-            return new MemoryImageLease(image, () => Release(entry));
+            return new MemoryImageLease(image, () => Release(key, entry));
         }
     }
 
@@ -129,6 +133,10 @@ public sealed class MemoryImageCache : IImageMemoryCache {
                 if (image is not null) {
                     entry.StrongSince = _timeProvider.GetUtcNow();
                     entry.LastAccess = entry.StrongSince;
+                    entry.LastAccessSequence = ++_accessSequence;
+                    _loadedItemCount++;
+                    EnqueueForEvictionIfEligible(key, entry);
+                    EnforceMaxItemsLocked();
                 }
                 else {
                     DetachEntryLocked(key, entry);
@@ -173,14 +181,39 @@ public sealed class MemoryImageCache : IImageMemoryCache {
         }
     }
 
-    private void Release(Entry entry) {
+    private void Release(string key, Entry entry) {
         lock (_gate) {
             if (entry.LeaseCount > 0)
                 entry.LeaseCount--;
 
             if (entry.LeaseCount == 0 && (_disposed || entry.IsDetached || IsExpired(entry)))
                 DisposeDetachedEntryIfUnused(entry);
+
+            if (!_disposed) {
+                EnqueueForEvictionIfEligible(key, entry);
+                EnforceMaxItemsLocked();
+            }
         }
+    }
+
+    private void EnforceMaxItemsLocked() {
+        if (_options.MaxItems is not { } maxItems)
+            return;
+
+        while (_loadedItemCount > maxItems && _evictionQueue.TryDequeue(out var candidate, out var sequence)) {
+            var entry = candidate.Entry;
+            if (entry.IsDetached || entry.Image is null ||
+                entry.LastAccessSequence != sequence || entry.LeaseCount != 0 || entry.WaiterCount != 0)
+                continue;
+
+            DetachEntryLocked(candidate.Key, entry);
+        }
+    }
+
+    private void EnqueueForEvictionIfEligible(string key, Entry entry) {
+        if (!entry.IsDetached && entry.Image is not null &&
+            entry.LeaseCount == 0 && entry.WaiterCount == 0)
+            _evictionQueue.Enqueue((key, entry), entry.LastAccessSequence);
     }
 
     private void CleanupExpiredEntries(object? state) {
@@ -198,10 +231,12 @@ public sealed class MemoryImageCache : IImageMemoryCache {
         }
     }
 
-    private void Touch(Entry entry) {
+    private void Touch(string key, Entry entry) {
         var now = _timeProvider.GetUtcNow();
         if (_options.SlidingExpiration is not null && !IsAbsoluteExpired(entry, now))
             entry.LastAccess = now;
+        entry.LastAccessSequence = ++_accessSequence;
+        EnqueueForEvictionIfEligible(key, entry);
     }
 
     private bool IsExpired(Entry entry) {
@@ -224,7 +259,11 @@ public sealed class MemoryImageCache : IImageMemoryCache {
         if (_entries.TryGetValue(key, out var current) && ReferenceEquals(current, entry))
             _entries.Remove(key);
 
-        entry.IsDetached = true;
+        if (!entry.IsDetached) {
+            entry.IsDetached = true;
+            if (entry.Image is not null)
+                _loadedItemCount--;
+        }
         DisposeDetachedEntryIfUnused(entry);
     }
 
@@ -253,6 +292,7 @@ public sealed class MemoryImageCache : IImageMemoryCache {
         public int LeaseCount;
         public DateTimeOffset StrongSince;
         public DateTimeOffset LastAccess;
+        public long LastAccessSequence;
         public bool IsDetached;
     }
 }
