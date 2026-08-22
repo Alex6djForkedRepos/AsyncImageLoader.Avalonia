@@ -296,6 +296,45 @@ public sealed class MemoryImageCacheTests {
     }
 
     [Fact]
+    public async Task MaxItemsIgnoresDetachedEntriesLeftInEvictionQueue() {
+        using var cache = new MemoryImageCache(new MemoryImageCacheOptions { MaxItems = 1 });
+        var loads = 0;
+        var first = await cache.GetOrCreateAsync("first", _ => CreateImageAsync(() => ++loads));
+        first!.Dispose();
+        cache.Clear();
+
+        var second = await cache.GetOrCreateAsync("second", _ => CreateImageAsync(() => ++loads));
+        second!.Dispose();
+        using var third = await cache.GetOrCreateAsync("third", _ => CreateImageAsync(() => ++loads));
+        third.Should().NotBeNull();
+        using var secondAgain = await cache.GetOrCreateAsync("second", _ => CreateImageAsync(() => ++loads));
+
+        secondAgain.Should().NotBeNull();
+        loads.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task MaxItemsKeepsCountCorrectAfterExpiredEntryIsRemoved() {
+        var timeProvider = new FakeTimeProvider();
+        using var cache = new MemoryImageCache(new MemoryImageCacheOptions {
+            MaxItems = 1,
+            AbsoluteExpiration = TimeSpan.FromMilliseconds(100)
+        }, timeProvider);
+        var loads = 0;
+        var first = await cache.GetOrCreateAsync("first", _ => CreateImageAsync(() => ++loads));
+        first!.Dispose();
+        timeProvider.Advance(TimeSpan.FromMilliseconds(100));
+
+        using var second = await cache.GetOrCreateAsync("second", _ => CreateImageAsync(() => ++loads));
+        second.Should().NotBeNull();
+        second.Dispose();
+        using var third = await cache.GetOrCreateAsync("third", _ => CreateImageAsync(() => ++loads));
+
+        third.Should().NotBeNull();
+        loads.Should().Be(3);
+    }
+
+    [Fact]
     public async Task AbsoluteExpirationWinsOverSlidingExpiration() {
         var timeProvider = new FakeTimeProvider();
         using var cache = new MemoryImageCache(new MemoryImageCacheOptions {
