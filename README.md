@@ -16,6 +16,9 @@ dotnet add package AsyncImageLoader.Avalonia
 ```
 2. Start using
 
+### Migrating from 3.x.x to 4.x.x
+4.0.0 introduces many breaking changes with a complete rework how the internals are handled. Read how to migrate here: https://github.com/AvaloniaUtils/AsyncImageLoader.Avalonia/pull/48#issuecomment-5310041871
+
 ## Using
 
 Note: The first time you will need to import the AsyncImageLoader namespace to your xaml file. Usually your IDE should [suggest it automatically](https://user-images.githubusercontent.com/29896317/140953397-00028365-5b93-4e6c-b470-094a555870c8.png). The root element in the file will be [like this](https://github.com/AvaloniaUtils/AsyncImageLoader.Avalonia/blob/master/AsyncImageLoader.Avalonia.Demo/Views/MainWindow.axaml#L6):
